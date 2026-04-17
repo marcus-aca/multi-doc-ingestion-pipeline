@@ -1,0 +1,10 @@
+{
+  "rawFileHash": {"S": "sha256:raw-abc123"},
+  "status": {"S": "RESOLVED"},
+  "processedS3Key": {"S": "processed/sub-001/file-001"},
+  "canonicalHash": {"S": "sha256:canon-xyz789"},
+  "documentId": {"S": "doc-001"},
+  "firstSeenAt": {"S": "2026-04-17T00:00:00Z"},
+  "lastSeenAt": {"S": "2026-04-17T00:05:00Z"},
+  "updatedAt": {"S": "2026-04-17T00:05:00Z"}
+}

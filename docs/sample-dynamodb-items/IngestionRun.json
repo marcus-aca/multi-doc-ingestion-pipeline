@@ -1,0 +1,7 @@
+{
+  "ingestionRunId": {"S": "run-001"},
+  "status": {"S": "STARTED"},
+  "kbOperationId": {"S": "kb-op-001"},
+  "documentIds": {"L": [{"S": "doc-001"}, {"S": "doc-002"}]},
+  "startedAt": {"S": "2026-04-17T00:02:00Z"}
+}

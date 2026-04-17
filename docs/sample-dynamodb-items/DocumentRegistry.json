@@ -1,0 +1,12 @@
+{
+  "documentId": {"S": "doc-001"},
+  "canonicalHash": {"S": "sha256:canon-xyz789"},
+  "businessDocumentKey": {"S": "business-doc-123"},
+  "sourceVersion": {"S": "7"},
+  "canonicalS3Key": {"S": "canonical/doc-001"},
+  "kbIngestionStatus": {"S": "INDEXED"},
+  "lastSuccessfulIngestionRunId": {"S": "run-001"},
+  "isActive": {"BOOL": true},
+  "createdAt": {"S": "2026-04-17T00:01:00Z"},
+  "updatedAt": {"S": "2026-04-17T00:10:00Z"}
+}

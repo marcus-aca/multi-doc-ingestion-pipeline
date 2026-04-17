@@ -1,0 +1,13 @@
+{
+  "submissionId": {"S": "sub-001"},
+  "externalRequestId": {"S": "req-001"},
+  "status": {"S": "RECEIVING"},
+  "expectedFileCount": {"N": "2"},
+  "receivedFileCount": {"N": "1"},
+  "manifestReceived": {"BOOL": false},
+  "ingestionPrefix": {"S": "ingestion/sub-001/"},
+  "fileIds": {"L": [{"S": "file-001"}]},
+  "documentIds": {"L": []},
+  "createdAt": {"S": "2026-04-17T00:00:00Z"},
+  "updatedAt": {"S": "2026-04-17T00:00:00Z"}
+}
