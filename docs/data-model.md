@@ -64,6 +64,12 @@ Suggested item shape:
 }
 ```
 
+Implementation note:
+
+- through Phase 8, the workflow sets `status=COMPLETE` once file-level canonical resolution is finished and `documentIds` are attached
+- the current implementation then moves the submission through `WAITING_FOR_INDEX` and `READY` as document ingestion completes
+- the current POC also records `callbackStatus=DELIVERED` and `callbackDeliveredAt` after the mock ready callback succeeds
+
 Access patterns:
 
 - get submission by `submissionId`
@@ -88,7 +94,7 @@ Suggested item shape:
 {
   "rawFileHash": "sha256:raw-abc123",
   "status": "RESOLVED",
-  "processedS3Key": "processed/sub-001/file-001",
+  "processedS3Key": "processed/sub-001/file-001.md",
   "canonicalHash": "sha256:canon-xyz789",
   "documentId": "doc-001",
   "firstSeenAt": "2026-04-17T00:00:00Z",
@@ -126,31 +132,50 @@ Suggested item shape:
 {
   "documentId": "doc-001",
   "canonicalHash": "sha256:canon-xyz789",
-  "businessDocumentKey": "business-doc-123",
-  "sourceVersion": "7",
-  "canonicalS3Key": "canonical/doc-001",
+  "canonicalS3Prefix": "canonical/doc-001/",
+  "canonicalChunkCount": 3,
+  "businessDocumentKey": "sample-001",
+  "sourceUpdatedAt": "2026-04-17",
   "kbIngestionStatus": "INDEXED",
-  "pendingIngestionRunId": null,
-  "lastSuccessfulIngestionRunId": "run-001",
-  "lastIngestionError": null,
   "isActive": true,
   "createdAt": "2026-04-17T00:01:00Z",
   "updatedAt": "2026-04-17T00:10:00Z"
 }
 ```
 
+Implementation note:
+
+- through Phase 9, the canonical registry writes:
+  - `documentId`
+  - `canonicalHash`
+- `canonicalS3Prefix`
+- `canonicalChunkCount`
+  - `businessDocumentKey` when available
+  - `sourceVersion` when available
+  - `sourceUpdatedAt` when available
+  - `kbIngestionStatus`
+  - `isActive`
+  - `createdAt`
+  - `updatedAt`
+- the canonical S3 object itself is plain Markdown only; canonical metadata remains in `DocumentRegistry`
+- business-version fields are only written when real upstream values exist so DynamoDB secondary-index key attributes are never populated with empty values
+- a later enriched item may also include:
+  - `pendingIngestionRunId`
+  - `lastSuccessfulIngestionRunId`
+  - `lastIngestionError`
+
 Access patterns:
 
 - get by `documentId`
 - find canonical duplicate by `canonicalHash`
 - find latest document for a `businessDocumentKey`
-- find documents waiting for direct ingestion
+- find documents waiting for Knowledge Base ingestion
 
 ## IngestionRun
 
 Purpose:
 
-- tracks one KB direct ingestion batch
+- tracks one KB ingestion run
 - ties a set of `documentId`s to one coordinator-managed operation
 
 Primary key:
@@ -174,7 +199,7 @@ Suggested item shape:
 Access patterns:
 
 - get ingestion run by `ingestionRunId`
-- inspect direct ingestion outcome for a set of documents
+- inspect Knowledge Base ingestion outcome for a set of documents
 
 ## Business Rules
 

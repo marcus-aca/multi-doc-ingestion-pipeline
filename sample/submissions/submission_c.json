@@ -1,0 +1,17 @@
+{
+  "label": "C",
+  "submissionIdTemplate": "phase14-c-{run_id}",
+  "files": [
+    {
+      "fileId": "warehouse-robotics-duplicate.json",
+      "logicalName": "warehouse_robotics_raw_duplicate",
+      "source": "sample/warehouse_robotics_us.json"
+    },
+    {
+      "fileId": "telehealth-platforms.json",
+      "logicalName": "telehealth_platforms",
+      "source": "sample/telehealth_platforms_us.json"
+    }
+  ]
+}
+

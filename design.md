@@ -47,8 +47,8 @@ The POC itself is a single trusted system. "Multiple users" refers to end users 
 - The workflow resolves each preprocessed file into either:
   - an already-known canonical document, or
   - a new or updated canonical document that must be ingested
-- Step Functions writes canonical documents to S3, records changed canonical documents as pending direct ingestion, and then waits for document-level readiness.
-- A separate Knowledge Base ingestion coordinator batches changed canonical documents into direct ingestion work so the design remains efficient as submission volume grows.
+- Step Functions writes canonical document chunks to S3, records changed canonical documents as pending ingestion, and then waits for document-level readiness.
+- A separate Knowledge Base ingestion coordinator starts and monitors `StartIngestionJob` sync runs against the S3-backed Knowledge Base so the design remains efficient as submission volume grows.
 - Once ingestion is complete, the POC sends a "ready" event back to the external system.
 - Later, the external system invokes an Amazon Bedrock AgentCore Runtime workflow to retrieve and search only the documents associated with that submission, and to call Anthropic Claude Sonnet 4.6 for placeholder summarization behavior.
 
@@ -67,8 +67,8 @@ Recommended settings:
 - no bucket versioning for the POC
 - one bucket with three main prefixes:
   - `ingestion/{submissionId}/{fileId}`
-  - `processed/{submissionId}/{fileId}`
-  - `canonical/{documentId}`
+  - `processed/{submissionId}/{fileId}.md`
+  - `canonical/{documentId}/chunk-0001.md`
 
 Why:
 
@@ -104,7 +104,7 @@ Purpose:
 Recommended settings:
 
 - use a clearly separated prefix inside the document bucket
-- prefix layout such as `processed/{submissionId}/{fileId}`
+- prefix layout such as `processed/{submissionId}/{fileId}.md`
 - lifecycle expiry after processing is complete unless retention is needed for debugging
 
 Typical preprocessing may include:
@@ -130,8 +130,8 @@ Purpose:
 
 Recommended settings:
 
-- one logical object per canonical document
-- prefix layout such as `canonical/{documentId}`
+- one logical canonical prefix per document
+- prefix layout such as `canonical/{documentId}/chunk-0001.md`
 - keep business lifecycle in DynamoDB, not in raw object naming
 
 Why:
@@ -141,6 +141,8 @@ Why:
 - supports controlled updates
 
 For the POC, the canonical area should behave as a clean current-state store. The `ingestion/` prefix carries short-lived transport input, the `processed/` prefix carries short-lived normalized intermediates, and the `canonical/` prefix carries the approved indexed form.
+
+Each canonical chunk object should be plain Markdown only so it is ready for Knowledge Base ingestion from S3. Canonical metadata such as hashes, status, and lifecycle state should remain in `DocumentRegistry`, not in the file body. The only S3 sidecar metadata retained in the current POC is a minimal `.metadata.json` file containing `documentId`.
 
 ## 5. State and Metadata Model
 
@@ -164,6 +166,12 @@ Design intent:
 - `rawFileHash` answers "have we seen this exact delivery before?"
 - `canonicalHash` answers "does this normalize to content we already know?"
 - `businessDocumentKey` answers "is this the same logical external document?"
+
+Current POC extraction:
+
+- for the sample JSON reports, `businessDocumentKey` is derived from `report_id`
+- for the sample JSON reports, `sourceUpdatedAt` is derived from `report_date`
+- if no ordering field is present, the latest submission is treated as active
 
 ### 5.2 Submission registry table
 
@@ -233,7 +241,8 @@ Suggested attributes:
 - `canonicalHash`
 - `businessDocumentKey` if the external system provides one
 - `sourceVersion` or `sourceUpdatedAt` if the external system provides one
-- `canonicalS3Key`
+- `canonicalS3Prefix`
+- `canonicalChunkCount`
 - `kbIngestionStatus`
 - `pendingIngestionRunId`
 - `lastSuccessfulIngestionRunId`
@@ -260,6 +269,11 @@ Purpose:
 - drives canonical dedupe
 - tracks the current active document for a business key
 - records whether a document is already indexed
+
+Implementation note:
+
+- through the current implementation checkpoint, `DocumentRegistry` writes only the required canonical fields plus ingestion status
+- optional business-version fields such as `businessDocumentKey`, `sourceVersion`, and `sourceUpdatedAt` are intentionally omitted until the upstream sends real values and Phase 9 activates the latest-document rule
 
 ### 5.5 Ingestion run table
 
@@ -368,11 +382,11 @@ Use a simpler split:
 - S3 upload events update the submission registry through Lambda
 - completion event starts the Step Functions execution
 - Step Functions drives the post-completion lifecycle through document readiness
-- a separate KB coordinator is responsible for starting and monitoring direct ingestion runs
+- a separate KB coordinator is responsible for starting and monitoring Knowledge Base sync runs
 
 This keeps the workflow compact while preserving a production-ready model.
 
-To keep the design scalable, the state machine should not assume that every completed submission immediately starts its own direct ingestion request. The state machine should resolve documents and register any new or updated canonical documents for ingestion, then wait on document-level ingestion status. This allows multiple submissions that depend on the same new canonical document to converge on the same downstream ingestion work while leaving ingestion execution to the coordinator.
+To keep the design scalable, the state machine should not assume that every completed submission immediately starts its own ingestion request. The state machine should resolve documents and register any new or updated canonical documents for ingestion, then wait on document-level ingestion status. This allows multiple submissions that depend on the same new canonical document to converge on the same downstream ingestion work while leaving ingestion execution to the coordinator.
 
 ## 7. Reuse and Update Strategy
 
@@ -395,7 +409,7 @@ Processing rule:
 - if `canonicalHash` does not exist:
   - create a new canonical document
   - write it to the canonical area
-  - mark it as pending direct ingestion into the Knowledge Base
+  - mark it as pending Knowledge Base ingestion
 
 This allows multiple submissions to reference the same canonical document and the same embeddings.
 
@@ -421,7 +435,7 @@ If the external system sends a changed version of an existing business document:
 - compute a new `canonicalHash`
 - create a new canonical document record if needed
 - write the new canonical content
-- mark the new version as pending direct ingestion into the Knowledge Base
+- mark the new version as pending Knowledge Base ingestion
 - mark the correct version as active in the registry
 
 This avoids forcing a full re-ingest of unchanged documents.
@@ -462,15 +476,25 @@ Reasoning:
 
 ### 8.2 Metadata model for retrieval
 
-Store metadata that supports safe request scoping, for example:
+Store metadata that supports safe request scoping, but keep the metadata actually pushed into the Knowledge Base as small as possible.
 
-- `documentId`
-- `canonicalHash`
-- `businessDocumentKey`
-- `sourceSystem`
-- `isActive`
+Recommended split:
+
+- Knowledge Base metadata:
+  - `documentId`
+- `DocumentRegistry` metadata:
+  - `canonicalHash`
+  - `businessDocumentKey`
+  - `sourceSystem`
+  - `isActive`
 
 `isActive` is operational metadata for identifying the latest document for a `businessDocumentKey`. Submission-scoped retrieval should rely on `documentId`, not on `isActive`, so older submissions remain reproducible even after a newer document becomes active.
+
+Implementation note:
+
+- in the current POC, the canonical sidecar stored next to each chunk such as `canonical/{documentId}/chunk-0001.md` carries only `documentId`
+- richer metadata remains in DynamoDB because Amazon S3 Vectors has tight filterable-metadata limits and larger sidecars caused ingestion failures during validation
+- the S3 vector index is created with `AMAZON_BEDROCK_TEXT` and `AMAZON_BEDROCK_METADATA` configured as non-filterable metadata keys, which is required for realistic chunk sizes to index successfully with Bedrock Knowledge Bases on Amazon S3 Vectors
 
 ### 8.3 Request scoping
 
@@ -484,28 +508,36 @@ This ensures that even though the KB contains documents from many submissions, r
 
 ### 8.4 Ingestion approach
 
-For a minimum POC with production-ready concepts, use direct ingestion as the normal path for changed documents, while continuing to mirror the same canonical content into the `canonical/` prefix in S3.
+The current implementation uses an S3-backed Knowledge Base and coordinator-managed `StartIngestionJob` sync runs as the ingestion path.
 
 Design note:
 
 - Bedrock Knowledge Base handles indexing and retrieval well
 - it does not manage submission completeness or document reuse logic on its own
-- direct ingestion is the primary freshness path for the POC
 - `canonical/` in S3 remains the mirrored source of record for document state, audit, and recovery
+- the coordinator owns ingestion throughput and run tracking
 
 Because Knowledge Base ingestion is asynchronous and typically takes minutes rather than seconds, the design should treat ingestion as a controlled throughput stage instead of coupling one ingestion request to one submission. The preferred operating model is:
 
 - Step Functions marks new or changed canonical documents as pending ingestion
-- an ingestion coordinator starts direct ingestion for accumulated changed documents on a short cadence or threshold
+- an ingestion coordinator starts `StartIngestionJob` for accumulated changed documents on a short cadence or threshold
 - the ingestion coordinator records an ingestion run and maps documents to that run
 - document-level ingestion status is updated in the registry
 - submissions become ready when all referenced documents are indexed
 
-This keeps the POC simple while allowing the same architecture to support higher submission counts without excessive data-source sync churn. At a target like 1,000 external submissions per day, S3, Lambda, DynamoDB, and Step Functions are not expected bottlenecks; the main scaling concern is the latency and frequency of Knowledge Base ingestion work. The coordinator pattern addresses that concern without changing the submission contract.
+This keeps the POC simple while allowing the same architecture to support higher submission counts without excessive job churn. At a target like 1,000 external submissions per day, S3, Lambda, DynamoDB, and Step Functions are not expected bottlenecks; the main scaling concern is the latency and effectiveness of Knowledge Base ingestion work. The coordinator pattern addresses that concern without changing the submission contract.
 
-Periodic S3-based reconciliation can be kept as an operational fallback, but it should not be the normal ingestion path. If reconciliation is ever used, the same design rule still holds: S3 and direct-ingested document state must remain aligned, and readiness must continue to be tracked through the registry rather than relying on the Knowledge Base alone.
+Current validated findings:
 
-If reconciliation sync is ever run, it should be a controlled recovery operation and should not overlap with active direct ingestion for the same documents.
+- Knowledge Base log delivery is enabled through Terraform to CloudWatch Logs for service-side debugging
+- the S3-backed Knowledge Base on Amazon S3 Vectors successfully ingests very small Markdown chunks with a minimal `documentId` sidecar
+- the initial Amazon S3 Vectors index configuration failed on larger chunks with the error `Filterable metadata must have at most 2048 bytes`
+- the fix was to recreate the S3 vector index with `AMAZON_BEDROCK_TEXT` and `AMAZON_BEDROCK_METADATA` marked as non-filterable metadata keys at index creation time
+- after that change, the POC successfully indexed:
+  - a tiny manual Markdown chunk
+  - a plain-text chunk of roughly `4,000` characters
+  - a realistic sample document flattened from JSON into `192` canonical Markdown chunks
+- the current implementation now proves the workflow, logging, orchestration path, and S3-backed Amazon S3 Vectors ingestion path for realistic POC documents
 
 ## 9. Readiness and External Callback
 
@@ -517,6 +549,14 @@ The system should send the ready event back to the external system only when:
 - the submission status is updated to `READY`
 
 Do not send ready when files merely arrive in S3.
+
+Implementation note:
+
+- the current implementation moves the submission to `WAITING_FOR_INDEX` after canonical resolution
+- Step Functions then waits and re-checks the referenced `documentId`s until they are all `INDEXED`
+- once all referenced documents are indexed, the workflow sets `SubmissionRegistry.status=READY` and records `readyAt`
+- the current POC then invokes a mock ready-callback Lambda, which records `callbackStatus=DELIVERED` and `callbackDeliveredAt` on the submission
+- retry and DLQ handling for callback delivery remain a later hardening step
 
 Recommended callback pattern:
 
@@ -534,7 +574,8 @@ Flow:
 2. the POC resolves the allowed `documentId`s from DynamoDB
 3. AgentCore retrieves from the shared Knowledge Base using metadata filters limited to those `documentId`s
 4. AgentCore passes the scoped retrieved content to Anthropic Claude Sonnet 4.6 through Amazon Bedrock model invocation
-5. for the POC, the response can remain placeholder summary logic as long as the retrieval step proves scope correctness
+5. for the current POC, the deployed implementation uses a direct Lambda wrapper for the same scoped retrieval pattern, and invokes Sonnet 4.6 through the Bedrock inference profile `us.anthropic.claude-sonnet-4-6`
+6. the response can remain placeholder summary logic as long as the retrieval step proves scope correctness
 
 This cleanly separates:
 
@@ -553,7 +594,7 @@ The POC should include the following production-ready concepts, even if implemen
 - conditional writes in DynamoDB for canonical document creation
 - conditional writes in DynamoDB for raw file ownership
 - document-level ingestion status so multiple submissions can wait on the same in-flight document
-- ingestion run tracking for coordinator-managed direct ingestion runs
+- ingestion run tracking for coordinator-managed Knowledge Base sync runs
 - explicit status transitions in DynamoDB
 - retries with exponential backoff for ingestion checks and callbacks
 - DLQ or manual review path for failures
@@ -650,11 +691,11 @@ Operational rule:
 - dedupe and versioning are business lifecycle concerns
 - the registry gives explicit control over reuse, active versions, and request scoping
 
-### Why prefer direct ingestion for this POC
+### Why keep the coordinator pattern
 
 - most submissions change only a small number of documents
-- direct ingestion is a better fit for small, frequent deltas
-- readiness latency is more predictable than repeated data-source sync cycles
+- submissions should not each create their own independent Knowledge Base job
+- readiness latency and throughput need explicit control
 - keeping `canonical/` mirrored in S3 preserves a clean recovery and audit path
 
 ## 14. Recommended POC Scope
@@ -671,7 +712,7 @@ Implement the following in the POC:
 - S3 upload event handler Lambda
 - explicit completion event or manifest
 - Step Functions state machine for post-completion orchestration
-- a lightweight ingestion coordinator pattern so changed documents can be directly ingested in a controlled way
+- a lightweight ingestion coordinator pattern so changed documents can be ingested in a controlled way
 - one shared Bedrock Knowledge Base
 - ready callback to external system
 - AgentCore Runtime query path filtered by submission-linked documents
@@ -704,7 +745,7 @@ This design keeps the implementation small while using production-grade concepts
 - raw duplicate collapse before expensive downstream work
 - document reuse by canonical content hash after preprocessing
 - safe handling of concurrent duplicate arrivals and same-document updates
-- controlled direct ingestion throughput as submission volume grows
+- controlled Knowledge Base ingestion throughput as submission volume grows
 - controlled handling of updates
 - correct retrieval scoped to the requested submission
 
@@ -736,32 +777,30 @@ sequenceDiagram
         SFN->>SFN: Compute rawFileHash
         SFN->>REG: Check RawFileRegistry{rawFileHash}
         alt Raw file already resolved
-            SFN->>REG: Reuse documentId for {submissionId, fileId}
+            SFN->>REG: Reuse resolved documentId for {submissionId, fileId}
         else Raw file in progress
             SFN->>REG: Wait/retry until RawFileRegistry resolves to documentId
         else Raw file not yet known
             SFN->>REG: Conditionally claim RawFileRegistry{rawFileHash}
             SFN->>PRE: Normalize and preprocess {submissionId, fileId}
-            PRE-->>SFN: Write processed/{submissionId}/{fileId} and return canonicalHash
+            PRE-->>SFN: Write processed/{submissionId}/{fileId}.md and return canonicalHash
             SFN->>REG: Check DocumentRegistry{canonicalHash}
             alt Canonical content already known
                 SFN->>REG: Update RawFileRegistry{rawFileHash -> documentId}
-                SFN->>REG: Attach existing documentId to SubmissionRegistry{submissionId}
+                SFN->>REG: Reuse canonical/{documentId}/chunk-*.md
             else New or newer canonical content
-                SFN->>CAN: Write canonical/{documentId}
-                SFN->>REG: Create DocumentRegistry{documentId, canonicalHash, businessDocumentKey, sourceVersion, isActive=false, kbIngestionStatus=PENDING_INGESTION}
+                SFN->>CAN: Write canonical/{documentId}/chunk-*.md and sidecars
+                SFN->>REG: Create DocumentRegistry{documentId, canonicalHash, canonicalS3Prefix, canonicalChunkCount, isActive=false, kbIngestionStatus=PENDING_INGESTION}
                 SFN->>REG: Update RawFileRegistry{rawFileHash -> documentId}
-                SFN->>REG: Attach documentId to SubmissionRegistry{submissionId}
             end
         end
     end
 
-    SFN->>REG: Mark referenced new documents as PENDING_INGESTION
+    SFN->>REG: Attach resolved documentIds to SubmissionRegistry{submissionId, status=COMPLETE}
     KBC->>REG: Select DocumentRegistry items where kbIngestionStatus=PENDING_INGESTION
     KBC->>REG: Create IngestionRun{ingestionRunId, documentIds[]}
-    KBC->>CAN: Read canonical/{documentId}
-    KBC->>KB: Direct ingest {documentId, canonicalHash, content, metadata}
-    KB-->>KBC: Direct ingestion status updates
+    KBC->>KB: StartIngestionJob for canonical/ prefix
+    KB-->>KBC: Ingestion job status updates
     KBC->>REG: Update DocumentRegistry{documentId, kbIngestionStatus=INDEXED, lastSuccessfulIngestionRunId}
     KBC->>REG: Mark latest businessDocumentKey submission active by sourceVersion/sourceUpdatedAt
     SFN->>REG: Confirm SubmissionRegistry{submissionId}.documentIds are all INDEXED

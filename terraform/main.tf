@@ -29,6 +29,54 @@ data "archive_file" "raw_file_resolver" {
   output_path = "${path.module}/build/raw_file_resolver.zip"
 }
 
+data "archive_file" "preprocessor" {
+  type        = "zip"
+  source_file = "${path.module}/../src/lambdas/preprocessor/app.py"
+  output_path = "${path.module}/build/preprocessor.zip"
+}
+
+data "archive_file" "canonical_resolver" {
+  type        = "zip"
+  source_file = "${path.module}/../src/lambdas/canonical_resolver/app.py"
+  output_path = "${path.module}/build/canonical_resolver.zip"
+}
+
+data "archive_file" "submission_document_attacher" {
+  type        = "zip"
+  source_file = "${path.module}/../src/lambdas/submission_document_attacher/app.py"
+  output_path = "${path.module}/build/submission_document_attacher.zip"
+}
+
+data "archive_file" "submission_readiness_checker" {
+  type        = "zip"
+  source_file = "${path.module}/../src/lambdas/submission_readiness_checker/app.py"
+  output_path = "${path.module}/build/submission_readiness_checker.zip"
+}
+
+data "archive_file" "ready_callback" {
+  type        = "zip"
+  source_file = "${path.module}/../src/lambdas/ready_callback/app.py"
+  output_path = "${path.module}/build/ready_callback.zip"
+}
+
+data "archive_file" "kb_coordinator" {
+  type        = "zip"
+  source_file = "${path.module}/../src/lambdas/kb_coordinator/app.py"
+  output_path = "${path.module}/build/kb_coordinator.zip"
+}
+
+data "archive_file" "query_api" {
+  type        = "zip"
+  source_file = "${path.module}/../src/lambdas/query_api/app.py"
+  output_path = "${path.module}/build/query_api.zip"
+}
+
+data "archive_file" "ops_monitor" {
+  type        = "zip"
+  source_file = "${path.module}/../src/lambdas/ops_monitor/app.py"
+  output_path = "${path.module}/build/ops_monitor.zip"
+}
+
 locals {
   resource_prefix = "${var.name_prefix}-${var.environment}"
 
@@ -45,19 +93,74 @@ locals {
     "${var.name_prefix}-${var.environment}-docs-${data.aws_caller_identity.current.account_id}-${data.aws_region.current.name}"
   )
 
-  knowledge_base_arn = var.knowledge_base_id != "" ? "arn:aws:bedrock:${var.aws_region}:${data.aws_caller_identity.current.account_id}:knowledge-base/${var.knowledge_base_id}" : "*"
+  vector_bucket_name = lower(
+    "${var.name_prefix}-${var.environment}-vectors-${data.aws_caller_identity.current.account_id}-${replace(data.aws_region.current.name, "-", "")}"
+  )
+
+  vector_index_name = lower("${var.name_prefix}-${var.environment}-index-v2")
+
+  knowledge_base_name                = "${replace(var.name_prefix, "-", "_")}_${var.environment}_kb_v2"
+  data_source_name                   = "${replace(var.name_prefix, "-", "_")}_${var.environment}_ds_v3"
+  knowledge_base_log_group_name      = "/aws/bedrock/knowledge-bases/${local.resource_prefix}"
+  knowledge_base_log_delivery_source = substr("${replace(var.name_prefix, "-", "_")}_${var.environment}_kb_src_v2", 0, 60)
+  knowledge_base_log_delivery_dest   = substr("${replace(var.name_prefix, "-", "_")}_${var.environment}_kb_dst_v2", 0, 60)
+
+  embedding_model_arn = "arn:aws:bedrock:${var.aws_region}::foundation-model/${var.embedding_model_id}"
+
+  knowledge_base_id  = try(aws_cloudformation_stack.bedrock_kb.outputs["KnowledgeBaseId"], "")
+  knowledge_base_arn = try(aws_cloudformation_stack.bedrock_kb.outputs["KnowledgeBaseArn"], "*")
+  data_source_id     = try(aws_cloudformation_stack.bedrock_kb.outputs["DataSourceId"], "")
+  vector_bucket_arn  = "arn:aws:s3vectors:${var.aws_region}:${data.aws_caller_identity.current.account_id}:bucket/${local.vector_bucket_name}"
+  vector_index_arn   = "${local.vector_bucket_arn}/index/${local.vector_index_name}"
 
   sonnet_model_arn = "arn:aws:bedrock:${var.aws_region}::foundation-model/${var.sonnet_model_id}"
 
   lambda_log_groups = {
-    upload_event_handler = "/aws/lambda/${local.resource_prefix}-upload-event-handler"
-    preprocessor         = "/aws/lambda/${local.resource_prefix}-preprocessor"
-    kb_coordinator       = "/aws/lambda/${local.resource_prefix}-kb-coordinator"
-    query_api            = "/aws/lambda/${local.resource_prefix}-query-api"
-    completion_trigger   = "/aws/lambda/${local.resource_prefix}-completion-trigger"
-    submission_validator = "/aws/lambda/${local.resource_prefix}-submission-validator"
-    raw_file_resolver    = "/aws/lambda/${local.resource_prefix}-raw-file-resolver"
+    upload_event_handler         = "/aws/lambda/${local.resource_prefix}-upload-event-handler"
+    preprocessor                 = "/aws/lambda/${local.resource_prefix}-preprocessor"
+    kb_coordinator               = "/aws/lambda/${local.resource_prefix}-kb-coordinator"
+    query_api                    = "/aws/lambda/${local.resource_prefix}-query-api"
+    ops_monitor                  = "/aws/lambda/${local.resource_prefix}-ops-monitor"
+    completion_trigger           = "/aws/lambda/${local.resource_prefix}-completion-trigger"
+    submission_validator         = "/aws/lambda/${local.resource_prefix}-submission-validator"
+    raw_file_resolver            = "/aws/lambda/${local.resource_prefix}-raw-file-resolver"
+    canonical_resolver           = "/aws/lambda/${local.resource_prefix}-canonical-resolver"
+    submission_document_attacher = "/aws/lambda/${local.resource_prefix}-submission-document-attacher"
+    submission_readiness_checker = "/aws/lambda/${local.resource_prefix}-submission-readiness-checker"
+    ready_callback               = "/aws/lambda/${local.resource_prefix}-ready-callback"
   }
+
+  non_terminal_submission_statuses = ["RECEIVING", "COMPLETE", "WAITING_FOR_INDEX"]
+  ingestion_run_statuses           = ["STARTED", "SUCCEEDED", "FAILED"]
+}
+
+resource "aws_cloudformation_stack" "bedrock_kb" {
+  name               = "${local.resource_prefix}-bedrock-kb"
+  on_failure         = "DELETE"
+  timeout_in_minutes = 30
+
+  template_body = templatefile("${path.module}/templates/bedrock-kb-s3vectors.yaml.tftpl", {
+    vector_bucket_name                 = local.vector_bucket_name
+    vector_index_name                  = local.vector_index_name
+    knowledge_base_name                = local.knowledge_base_name
+    data_source_name                   = local.data_source_name
+    knowledge_base_role_arn            = aws_iam_role.bedrock_knowledge_base.arn
+    embedding_model_arn                = local.embedding_model_arn
+    embedding_dimensions               = var.embedding_dimensions
+    source_bucket_arn                  = aws_s3_bucket.documents.arn
+    source_inclusion_prefix            = "canonical/"
+    knowledge_base_log_group_name      = local.knowledge_base_log_group_name
+    knowledge_base_log_delivery_source = local.knowledge_base_log_delivery_source
+    knowledge_base_log_delivery_dest   = local.knowledge_base_log_delivery_dest
+  })
+
+  tags = local.common_tags
+
+  depends_on = [
+    aws_s3_bucket.documents,
+    aws_s3_bucket_server_side_encryption_configuration.documents,
+    aws_iam_role_policy.bedrock_knowledge_base,
+  ]
 }
 
 resource "aws_s3_bucket" "documents" {
@@ -122,7 +225,6 @@ resource "aws_s3_object" "prefix_markers" {
   for_each = {
     ingestion = "ingestion/.keep"
     processed = "processed/.keep"
-    canonical = "canonical/.keep"
   }
 
   bucket       = aws_s3_bucket.documents.id
@@ -251,6 +353,34 @@ resource "aws_cloudwatch_log_group" "step_functions" {
   })
 }
 
+resource "aws_sqs_queue" "manual_review_dlq" {
+  name                        = "${local.resource_prefix}-manual-review-dlq.fifo"
+  fifo_queue                  = true
+  content_based_deduplication = true
+  message_retention_seconds   = 1209600
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_prefix}-manual-review-dlq"
+  })
+}
+
+resource "aws_sqs_queue" "manual_review" {
+  name                        = "${local.resource_prefix}-manual-review.fifo"
+  fifo_queue                  = true
+  content_based_deduplication = true
+  visibility_timeout_seconds  = 60
+  message_retention_seconds   = 1209600
+
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.manual_review_dlq.arn
+    maxReceiveCount     = 5
+  })
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_prefix}-manual-review"
+  })
+}
+
 resource "aws_lambda_function" "upload_event_handler" {
   function_name    = "${local.resource_prefix}-upload-event-handler"
   role             = aws_iam_role.upload_event_handler.arn
@@ -344,6 +474,268 @@ resource "aws_lambda_function" "raw_file_resolver" {
   })
 }
 
+resource "aws_lambda_function" "preprocessor" {
+  function_name    = "${local.resource_prefix}-preprocessor"
+  role             = aws_iam_role.preprocessor.arn
+  handler          = "app.lambda_handler"
+  runtime          = "python3.12"
+  filename         = data.archive_file.preprocessor.output_path
+  source_code_hash = data.archive_file.preprocessor.output_base64sha256
+  timeout          = 30
+
+  environment {
+    variables = {
+      DOCUMENT_BUCKET_NAME    = aws_s3_bucket.documents.id
+      RAW_FILE_REGISTRY_TABLE = aws_dynamodb_table.raw_file_registry.name
+      INGESTION_PREFIX        = "ingestion/"
+      PROCESSED_PREFIX        = "processed/"
+      MANUAL_REVIEW_QUEUE_URL = aws_sqs_queue.manual_review.url
+    }
+  }
+
+  depends_on = [
+    aws_cloudwatch_log_group.lambda
+  ]
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_prefix}-preprocessor"
+  })
+}
+
+resource "aws_lambda_function" "canonical_resolver" {
+  function_name    = "${local.resource_prefix}-canonical-resolver"
+  role             = aws_iam_role.canonical_resolver.arn
+  handler          = "app.lambda_handler"
+  runtime          = "python3.12"
+  filename         = data.archive_file.canonical_resolver.output_path
+  source_code_hash = data.archive_file.canonical_resolver.output_base64sha256
+  timeout          = 120
+
+  environment {
+    variables = {
+      DOCUMENT_BUCKET_NAME      = aws_s3_bucket.documents.id
+      RAW_FILE_REGISTRY_TABLE   = aws_dynamodb_table.raw_file_registry.name
+      DOCUMENT_REGISTRY_TABLE   = aws_dynamodb_table.document_registry.name
+      PROCESSED_PREFIX          = "processed/"
+      CANONICAL_PREFIX          = "canonical/"
+      CANONICAL_CHUNK_MAX_CHARS = tostring(var.canonical_chunk_max_chars)
+    }
+  }
+
+  depends_on = [
+    aws_cloudwatch_log_group.lambda
+  ]
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_prefix}-canonical-resolver"
+  })
+}
+
+resource "aws_lambda_function" "submission_document_attacher" {
+  function_name    = "${local.resource_prefix}-submission-document-attacher"
+  role             = aws_iam_role.submission_document_attacher.arn
+  handler          = "app.lambda_handler"
+  runtime          = "python3.12"
+  filename         = data.archive_file.submission_document_attacher.output_path
+  source_code_hash = data.archive_file.submission_document_attacher.output_base64sha256
+  timeout          = 30
+
+  environment {
+    variables = {
+      SUBMISSION_REGISTRY_TABLE = aws_dynamodb_table.submission_registry.name
+    }
+  }
+
+  depends_on = [
+    aws_cloudwatch_log_group.lambda
+  ]
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_prefix}-submission-document-attacher"
+  })
+}
+
+resource "aws_lambda_function" "submission_readiness_checker" {
+  function_name    = "${local.resource_prefix}-submission-readiness-checker"
+  role             = aws_iam_role.submission_readiness_checker.arn
+  handler          = "app.lambda_handler"
+  runtime          = "python3.12"
+  filename         = data.archive_file.submission_readiness_checker.output_path
+  source_code_hash = data.archive_file.submission_readiness_checker.output_base64sha256
+  timeout          = 30
+
+  environment {
+    variables = {
+      SUBMISSION_REGISTRY_TABLE = aws_dynamodb_table.submission_registry.name
+      DOCUMENT_REGISTRY_TABLE   = aws_dynamodb_table.document_registry.name
+    }
+  }
+
+  depends_on = [
+    aws_cloudwatch_log_group.lambda
+  ]
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_prefix}-submission-readiness-checker"
+  })
+}
+
+resource "aws_lambda_function" "ready_callback" {
+  function_name    = "${local.resource_prefix}-ready-callback"
+  role             = aws_iam_role.ready_callback.arn
+  handler          = "app.lambda_handler"
+  runtime          = "python3.12"
+  filename         = data.archive_file.ready_callback.output_path
+  source_code_hash = data.archive_file.ready_callback.output_base64sha256
+  timeout          = 30
+
+  environment {
+    variables = {
+      SUBMISSION_REGISTRY_TABLE = aws_dynamodb_table.submission_registry.name
+      MANUAL_REVIEW_QUEUE_URL   = aws_sqs_queue.manual_review.url
+    }
+  }
+
+  depends_on = [
+    aws_cloudwatch_log_group.lambda
+  ]
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_prefix}-ready-callback"
+  })
+}
+
+resource "aws_lambda_function" "kb_coordinator" {
+  function_name    = "${local.resource_prefix}-kb-coordinator"
+  role             = aws_iam_role.kb_coordinator.arn
+  handler          = "app.lambda_handler"
+  runtime          = "python3.12"
+  filename         = data.archive_file.kb_coordinator.output_path
+  source_code_hash = data.archive_file.kb_coordinator.output_base64sha256
+  timeout          = 60
+
+  environment {
+    variables = {
+      DOCUMENT_REGISTRY_TABLE   = aws_dynamodb_table.document_registry.name
+      INGESTION_RUN_TABLE       = aws_dynamodb_table.ingestion_run.name
+      KNOWLEDGE_BASE_ID         = local.knowledge_base_id
+      DATA_SOURCE_ID            = local.data_source_id
+      KB_COORDINATOR_BATCH_SIZE = tostring(var.kb_coordinator_batch_size)
+    }
+  }
+
+  depends_on = [
+    aws_cloudwatch_log_group.lambda
+  ]
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_prefix}-kb-coordinator"
+  })
+}
+
+resource "aws_lambda_function" "ops_monitor" {
+  function_name    = "${local.resource_prefix}-ops-monitor"
+  role             = aws_iam_role.ops_monitor.arn
+  handler          = "app.lambda_handler"
+  runtime          = "python3.12"
+  filename         = data.archive_file.ops_monitor.output_path
+  source_code_hash = data.archive_file.ops_monitor.output_base64sha256
+  timeout          = 60
+
+  environment {
+    variables = {
+      SUBMISSION_REGISTRY_TABLE          = aws_dynamodb_table.submission_registry.name
+      DOCUMENT_REGISTRY_TABLE            = aws_dynamodb_table.document_registry.name
+      INGESTION_RUN_TABLE                = aws_dynamodb_table.ingestion_run.name
+      MANUAL_REVIEW_QUEUE_URL            = aws_sqs_queue.manual_review.url
+      OPERATIONS_METRIC_NAMESPACE        = "MDIP/Operations"
+      ENVIRONMENT                        = var.environment
+      STALE_INGESTING_THRESHOLD_MINUTES  = tostring(var.stale_ingesting_threshold_minutes)
+      STALE_SUBMISSION_THRESHOLD_MINUTES = tostring(var.stale_submission_threshold_minutes)
+    }
+  }
+
+  depends_on = [
+    aws_cloudwatch_log_group.lambda
+  ]
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_prefix}-ops-monitor"
+  })
+}
+
+resource "aws_lambda_function" "query_api" {
+  function_name    = "${local.resource_prefix}-query-api"
+  role             = aws_iam_role.query_api.arn
+  handler          = "app.lambda_handler"
+  runtime          = "python3.12"
+  filename         = data.archive_file.query_api.output_path
+  source_code_hash = data.archive_file.query_api.output_base64sha256
+  timeout          = 30
+  memory_size      = 256
+
+  environment {
+    variables = {
+      SUBMISSION_REGISTRY_TABLE     = aws_dynamodb_table.submission_registry.name
+      KNOWLEDGE_BASE_ID             = local.knowledge_base_id
+      SONNET_MODEL_ID               = var.sonnet_model_id
+      SONNET_INFERENCE_PROFILE_ID   = var.sonnet_inference_profile_id
+      QUERY_API_DEFAULT_MAX_RESULTS = "5"
+      QUERY_API_MAX_SNIPPET_CHARS   = "1200"
+      QUERY_API_MAX_MODEL_SNIPPETS  = "4"
+      QUERY_API_MAX_TOKENS          = "400"
+    }
+  }
+
+  depends_on = [
+    aws_cloudwatch_log_group.lambda
+  ]
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_prefix}-query-api"
+  })
+}
+
+resource "aws_cloudwatch_event_rule" "kb_coordinator_schedule" {
+  name                = "${local.resource_prefix}-kb-coordinator-schedule"
+  description         = "Periodic KB ingestion-job coordination for pending canonical docs."
+  schedule_expression = var.kb_coordinator_schedule_expression
+}
+
+resource "aws_cloudwatch_event_rule" "ops_monitor_schedule" {
+  name                = "${local.resource_prefix}-ops-monitor-schedule"
+  description         = "Periodic operational monitoring for stale pipeline items and manual review routing."
+  schedule_expression = var.ops_monitor_schedule_expression
+}
+
+resource "aws_cloudwatch_event_target" "kb_coordinator_schedule" {
+  rule      = aws_cloudwatch_event_rule.kb_coordinator_schedule.name
+  target_id = "kb-coordinator"
+  arn       = aws_lambda_function.kb_coordinator.arn
+}
+
+resource "aws_cloudwatch_event_target" "ops_monitor_schedule" {
+  rule      = aws_cloudwatch_event_rule.ops_monitor_schedule.name
+  target_id = "ops-monitor"
+  arn       = aws_lambda_function.ops_monitor.arn
+}
+
+resource "aws_lambda_permission" "allow_eventbridge_kb_coordinator" {
+  statement_id  = "AllowExecutionFromEventBridgeKbCoordinator"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.kb_coordinator.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.kb_coordinator_schedule.arn
+}
+
+resource "aws_lambda_permission" "allow_eventbridge_ops_monitor" {
+  statement_id  = "AllowExecutionFromEventBridgeOpsMonitor"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.ops_monitor.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.ops_monitor_schedule.arn
+}
+
 resource "aws_lambda_permission" "allow_s3_upload_events" {
   statement_id  = "AllowExecutionFromS3IngestionBucket"
   action        = "lambda:InvokeFunction"
@@ -357,7 +749,7 @@ resource "aws_sfn_state_machine" "submission_orchestration" {
   role_arn = aws_iam_role.step_functions.arn
 
   definition = jsonencode({
-    Comment = "Phase 6 submission orchestration with raw file dedupe"
+    Comment = "Phase 11 submission orchestration through canonical resolution and readiness"
     StartAt = "LoadSubmissionState"
     States = {
       LoadSubmissionState = {
@@ -436,12 +828,12 @@ resource "aws_sfn_state_machine" "submission_orchestration" {
                 {
                   Variable      = "$.rawFileCheck.resolution.ownershipClaimed"
                   BooleanEquals = true
-                  Next          = "FileResolutionComplete"
+                  Next          = "PreprocessOwnedRawFile"
                 },
                 {
                   Variable     = "$.rawFileCheck.resolution.rawFileStatus"
                   StringEquals = "RESOLVED"
-                  Next         = "FileResolutionComplete"
+                  Next         = "ReuseResolvedRawFile"
                 },
                 {
                   Variable        = "$.retryCount"
@@ -465,10 +857,66 @@ resource "aws_sfn_state_machine" "submission_orchestration" {
               }
               Next = "ResolveRawFile"
             }
-            FileResolutionComplete = {
+            PreprocessOwnedRawFile = {
+              Type     = "Task"
+              Resource = "arn:aws:states:::lambda:invoke"
+              Parameters = {
+                FunctionName = aws_lambda_function.preprocessor.arn
+                Payload = {
+                  "submissionId.$" = "$.submissionId"
+                  "fileId.$"       = "$.fileId"
+                  "rawFileHash.$"  = "$.rawFileCheck.resolution.rawFileHash"
+                }
+              }
+              ResultSelector = {
+                "preprocessing.$" = "$.Payload"
+              }
+              ResultPath = "$.preprocessResult"
+              Next       = "ResolveCanonicalDocument"
+            }
+            ResolveCanonicalDocument = {
+              Type     = "Task"
+              Resource = "arn:aws:states:::lambda:invoke"
+              Parameters = {
+                FunctionName = aws_lambda_function.canonical_resolver.arn
+                Payload = {
+                  "submissionId.$"          = "$.submissionId"
+                  "fileId.$"                = "$.fileId"
+                  "rawFileHash.$"           = "$.rawFileCheck.resolution.rawFileHash"
+                  "processedS3Key.$"        = "$.preprocessResult.preprocessing.processedS3Key"
+                  "canonicalHash.$"         = "$.preprocessResult.preprocessing.canonicalHash"
+                  "businessDocumentKey.$"   = "$.preprocessResult.preprocessing.businessDocumentKey"
+                  "sourceVersion.$"         = "$.preprocessResult.preprocessing.sourceVersion"
+                  "sourceUpdatedAt.$"       = "$.preprocessResult.preprocessing.sourceUpdatedAt"
+                  "normalizationStrategy.$" = "$.preprocessResult.preprocessing.normalizationStrategy"
+                  "extractedMetadata.$"     = "$.preprocessResult.preprocessing.extractedMetadata"
+                }
+              }
+              ResultSelector = {
+                "canonical.$" = "$.Payload"
+              }
+              ResultPath = "$.canonicalResult"
+              Next       = "OwnedRawFileComplete"
+            }
+            OwnedRawFileComplete = {
+              Type = "Pass"
+              Parameters = {
+                "resolution.$"    = "$.rawFileCheck.resolution"
+                "preprocessing.$" = "$.preprocessResult.preprocessing"
+                "canonical.$"     = "$.canonicalResult.canonical"
+              }
+              End = true
+            }
+            ReuseResolvedRawFile = {
               Type = "Pass"
               Parameters = {
                 "resolution.$" = "$.rawFileCheck.resolution"
+                "canonical" = {
+                  "action"                 = "canonical_document_reused_from_raw_resolution"
+                  "documentId.$"           = "$.rawFileCheck.resolution.documentId"
+                  "canonicalHash.$"        = "$.rawFileCheck.resolution.canonicalHash"
+                  "reusedExistingDocument" = true
+                }
               }
               End = true
             }
@@ -479,7 +927,83 @@ resource "aws_sfn_state_machine" "submission_orchestration" {
             }
           }
         }
-        Next = "Success"
+        Next = "AttachSubmissionDocuments"
+      }
+      AttachSubmissionDocuments = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::lambda:invoke"
+        Parameters = {
+          FunctionName = aws_lambda_function.submission_document_attacher.arn
+          Payload = {
+            "submissionId.$"   = "$.submissionId"
+            "rawFileResults.$" = "$.rawFileResults"
+          }
+        }
+        ResultSelector = {
+          "attachment.$" = "$.Payload"
+        }
+        ResultPath = "$.attachmentResult"
+        Next       = "CheckSubmissionReadiness"
+      }
+      CheckSubmissionReadiness = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::lambda:invoke"
+        Parameters = {
+          FunctionName = aws_lambda_function.submission_readiness_checker.arn
+          Payload = {
+            "submissionId.$" = "$.submissionId"
+            "documentIds.$"  = "$.attachmentResult.attachment.documentIds"
+          }
+        }
+        ResultSelector = {
+          "readiness.$" = "$.Payload"
+        }
+        ResultPath = "$.readinessResult"
+        Next       = "SubmissionReady?"
+      }
+      "SubmissionReady?" = {
+        Type = "Choice"
+        Choices = [
+          {
+            Variable      = "$.readinessResult.readiness.hasFailures"
+            BooleanEquals = true
+            Next          = "SubmissionIndexingFailed"
+          },
+          {
+            Variable      = "$.readinessResult.readiness.isReady"
+            BooleanEquals = true
+            Next          = "SendReadyCallback"
+          }
+        ]
+        Default = "WaitForDocumentIndexing"
+      }
+      WaitForDocumentIndexing = {
+        Type    = "Wait"
+        Seconds = 10
+        Next    = "CheckSubmissionReadiness"
+      }
+      SubmissionIndexingFailed = {
+        Type  = "Fail"
+        Error = "SubmissionIndexingFailed"
+        Cause = "One or more referenced documents failed knowledge base ingestion."
+      }
+      SendReadyCallback = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::lambda:invoke"
+        Parameters = {
+          FunctionName = aws_lambda_function.ready_callback.arn
+          Payload = {
+            "submissionId.$" = "$.submissionId"
+            "status"         = "READY"
+            "readyAt.$"      = "$.readinessResult.readiness.readyAt"
+            "documentIds.$"  = "$.attachmentResult.attachment.documentIds"
+          }
+        }
+        ResultSelector = {
+          "callback.$" = "$.Payload"
+        }
+        ResultPath = "$.callbackResult"
+        Next       = "Success"
       }
       SubmissionInvalid = {
         Type  = "Fail"
@@ -567,6 +1091,31 @@ data "aws_iam_policy_document" "agentcore_runtime_assume_role" {
   }
 }
 
+data "aws_iam_policy_document" "bedrock_knowledge_base_assume_role" {
+  statement {
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["bedrock.amazonaws.com"]
+    }
+
+    actions = ["sts:AssumeRole"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+
+    condition {
+      test     = "ArnLike"
+      variable = "AWS:SourceArn"
+      values   = ["arn:aws:bedrock:${var.aws_region}:${data.aws_caller_identity.current.account_id}:knowledge-base/*"]
+    }
+  }
+}
+
 resource "aws_iam_role" "upload_event_handler" {
   name               = "${local.resource_prefix}-upload-event-handler-role"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
@@ -591,6 +1140,30 @@ resource "aws_iam_role" "raw_file_resolver" {
   tags               = local.common_tags
 }
 
+resource "aws_iam_role" "canonical_resolver" {
+  name               = "${local.resource_prefix}-canonical-resolver-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+  tags               = local.common_tags
+}
+
+resource "aws_iam_role" "submission_document_attacher" {
+  name               = "${local.resource_prefix}-submission-document-attacher-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+  tags               = local.common_tags
+}
+
+resource "aws_iam_role" "submission_readiness_checker" {
+  name               = "${local.resource_prefix}-submission-readiness-checker-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+  tags               = local.common_tags
+}
+
+resource "aws_iam_role" "ready_callback" {
+  name               = "${local.resource_prefix}-ready-callback-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+  tags               = local.common_tags
+}
+
 resource "aws_iam_role" "preprocessor" {
   name               = "${local.resource_prefix}-preprocessor-role"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
@@ -609,6 +1182,12 @@ resource "aws_iam_role" "query_api" {
   tags               = local.common_tags
 }
 
+resource "aws_iam_role" "ops_monitor" {
+  name               = "${local.resource_prefix}-ops-monitor-role"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume_role.json
+  tags               = local.common_tags
+}
+
 resource "aws_iam_role" "step_functions" {
   name               = "${local.resource_prefix}-step-functions-role"
   assume_role_policy = data.aws_iam_policy_document.states_assume_role.json
@@ -621,15 +1200,26 @@ resource "aws_iam_role" "agentcore_runtime_execution" {
   tags               = local.common_tags
 }
 
+resource "aws_iam_role" "bedrock_knowledge_base" {
+  name               = "${local.resource_prefix}-bedrock-knowledge-base-role"
+  assume_role_policy = data.aws_iam_policy_document.bedrock_knowledge_base_assume_role.json
+  tags               = local.common_tags
+}
+
 resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
   for_each = {
-    upload_event_handler = aws_iam_role.upload_event_handler.name
-    preprocessor         = aws_iam_role.preprocessor.name
-    kb_coordinator       = aws_iam_role.kb_coordinator.name
-    query_api            = aws_iam_role.query_api.name
-    completion_trigger   = aws_iam_role.completion_trigger.name
-    submission_validator = aws_iam_role.submission_validator.name
-    raw_file_resolver    = aws_iam_role.raw_file_resolver.name
+    upload_event_handler         = aws_iam_role.upload_event_handler.name
+    preprocessor                 = aws_iam_role.preprocessor.name
+    kb_coordinator               = aws_iam_role.kb_coordinator.name
+    query_api                    = aws_iam_role.query_api.name
+    ops_monitor                  = aws_iam_role.ops_monitor.name
+    completion_trigger           = aws_iam_role.completion_trigger.name
+    submission_validator         = aws_iam_role.submission_validator.name
+    raw_file_resolver            = aws_iam_role.raw_file_resolver.name
+    canonical_resolver           = aws_iam_role.canonical_resolver.name
+    submission_document_attacher = aws_iam_role.submission_document_attacher.name
+    submission_readiness_checker = aws_iam_role.submission_readiness_checker.name
+    ready_callback               = aws_iam_role.ready_callback.name
   }
 
   role       = each.value
@@ -684,6 +1274,85 @@ data "aws_iam_policy_document" "raw_file_resolver" {
   }
 }
 
+data "aws_iam_policy_document" "canonical_resolver" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:ListBucket"
+    ]
+    resources = [
+      aws_s3_bucket.documents.arn,
+      "${aws_s3_bucket.documents.arn}/processed/*",
+      "${aws_s3_bucket.documents.arn}/canonical/*"
+    ]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:Query",
+      "dynamodb:DescribeTable"
+    ]
+    resources = [
+      aws_dynamodb_table.raw_file_registry.arn,
+      aws_dynamodb_table.document_registry.arn,
+      "${aws_dynamodb_table.document_registry.arn}/index/*"
+    ]
+  }
+}
+
+data "aws_iam_policy_document" "submission_document_attacher" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:DescribeTable"
+    ]
+    resources = [aws_dynamodb_table.submission_registry.arn]
+  }
+}
+
+data "aws_iam_policy_document" "submission_readiness_checker" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:DescribeTable"
+    ]
+    resources = [
+      aws_dynamodb_table.submission_registry.arn,
+      aws_dynamodb_table.document_registry.arn
+    ]
+  }
+}
+
+data "aws_iam_policy_document" "ready_callback" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:DescribeTable"
+    ]
+    resources = [aws_dynamodb_table.submission_registry.arn]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "sqs:SendMessage"
+    ]
+    resources = [aws_sqs_queue.manual_review.arn]
+  }
+}
+
 
 data "aws_iam_policy_document" "preprocessor" {
   statement {
@@ -717,21 +1386,17 @@ data "aws_iam_policy_document" "preprocessor" {
       "${aws_dynamodb_table.document_registry.arn}/index/*"
     ]
   }
-}
 
-data "aws_iam_policy_document" "kb_coordinator" {
   statement {
     effect = "Allow"
     actions = [
-      "s3:GetObject",
-      "s3:ListBucket"
+      "sqs:SendMessage"
     ]
-    resources = [
-      aws_s3_bucket.documents.arn,
-      "${aws_s3_bucket.documents.arn}/canonical/*"
-    ]
+    resources = [aws_sqs_queue.manual_review.arn]
   }
+}
 
+data "aws_iam_policy_document" "kb_coordinator" {
   statement {
     effect = "Allow"
     actions = [
@@ -753,10 +1418,7 @@ data "aws_iam_policy_document" "kb_coordinator" {
     effect = "Allow"
     actions = [
       "bedrock:StartIngestionJob",
-      "bedrock:IngestKnowledgeBaseDocuments",
-      "bedrock:GetKnowledgeBaseDocuments",
-      "bedrock:ListKnowledgeBaseDocuments",
-      "bedrock:DeleteKnowledgeBaseDocuments"
+      "bedrock:GetIngestionJob"
     ]
     resources = [local.knowledge_base_arn]
   }
@@ -786,6 +1448,37 @@ data "aws_iam_policy_document" "query_api" {
       "bedrock:InvokeModelWithResponseStream"
     ]
     resources = ["*"]
+  }
+}
+
+data "aws_iam_policy_document" "ops_monitor" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "dynamodb:Scan",
+      "dynamodb:DescribeTable"
+    ]
+    resources = [
+      aws_dynamodb_table.submission_registry.arn,
+      aws_dynamodb_table.document_registry.arn,
+      aws_dynamodb_table.ingestion_run.arn
+    ]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "cloudwatch:PutMetricData"
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "sqs:SendMessage"
+    ]
+    resources = [aws_sqs_queue.manual_review.arn]
   }
 }
 
@@ -929,6 +1622,65 @@ data "aws_iam_policy_document" "agentcore_runtime_execution" {
   }
 }
 
+data "aws_iam_policy_document" "bedrock_knowledge_base" {
+  statement {
+    effect = "Allow"
+    actions = [
+      "bedrock:ListFoundationModels",
+      "bedrock:ListCustomModels"
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "bedrock:InvokeModel"
+    ]
+    resources = [local.embedding_model_arn]
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "s3:ListBucket"
+    ]
+    resources = [aws_s3_bucket.documents.arn]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "s3:GetObject"
+    ]
+    resources = ["${aws_s3_bucket.documents.arn}/canonical/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+  }
+
+  statement {
+    effect = "Allow"
+    actions = [
+      "s3vectors:PutVectors",
+      "s3vectors:GetVectors",
+      "s3vectors:DeleteVectors",
+      "s3vectors:QueryVectors",
+      "s3vectors:GetIndex"
+    ]
+    resources = [local.vector_index_arn]
+  }
+}
+
 resource "aws_iam_role_policy" "upload_event_handler" {
   name   = "${local.resource_prefix}-upload-event-handler-policy"
   role   = aws_iam_role.upload_event_handler.id
@@ -945,6 +1697,30 @@ resource "aws_iam_role_policy" "raw_file_resolver" {
   name   = "${local.resource_prefix}-raw-file-resolver-policy"
   role   = aws_iam_role.raw_file_resolver.id
   policy = data.aws_iam_policy_document.raw_file_resolver.json
+}
+
+resource "aws_iam_role_policy" "canonical_resolver" {
+  name   = "${local.resource_prefix}-canonical-resolver-policy"
+  role   = aws_iam_role.canonical_resolver.id
+  policy = data.aws_iam_policy_document.canonical_resolver.json
+}
+
+resource "aws_iam_role_policy" "submission_document_attacher" {
+  name   = "${local.resource_prefix}-submission-document-attacher-policy"
+  role   = aws_iam_role.submission_document_attacher.id
+  policy = data.aws_iam_policy_document.submission_document_attacher.json
+}
+
+resource "aws_iam_role_policy" "submission_readiness_checker" {
+  name   = "${local.resource_prefix}-submission-readiness-checker-policy"
+  role   = aws_iam_role.submission_readiness_checker.id
+  policy = data.aws_iam_policy_document.submission_readiness_checker.json
+}
+
+resource "aws_iam_role_policy" "ready_callback" {
+  name   = "${local.resource_prefix}-ready-callback-policy"
+  role   = aws_iam_role.ready_callback.id
+  policy = data.aws_iam_policy_document.ready_callback.json
 }
 
 
@@ -966,6 +1742,12 @@ resource "aws_iam_role_policy" "query_api" {
   policy = data.aws_iam_policy_document.query_api.json
 }
 
+resource "aws_iam_role_policy" "ops_monitor" {
+  name   = "${local.resource_prefix}-ops-monitor-policy"
+  role   = aws_iam_role.ops_monitor.id
+  policy = data.aws_iam_policy_document.ops_monitor.json
+}
+
 resource "aws_iam_role_policy" "step_functions" {
   name   = "${local.resource_prefix}-step-functions-policy"
   role   = aws_iam_role.step_functions.id
@@ -976,4 +1758,174 @@ resource "aws_iam_role_policy" "agentcore_runtime_execution" {
   name   = "${local.resource_prefix}-agentcore-runtime-execution-policy"
   role   = aws_iam_role.agentcore_runtime_execution.id
   policy = data.aws_iam_policy_document.agentcore_runtime_execution.json
+}
+
+resource "aws_iam_role_policy" "bedrock_knowledge_base" {
+  name   = "${local.resource_prefix}-bedrock-knowledge-base-policy"
+  role   = aws_iam_role.bedrock_knowledge_base.id
+  policy = data.aws_iam_policy_document.bedrock_knowledge_base.json
+}
+
+resource "aws_cloudwatch_metric_alarm" "submission_orchestration_failed" {
+  alarm_name          = "${local.resource_prefix}-submission-orchestration-failed"
+  alarm_description   = "Alerts when submission orchestration executions fail."
+  namespace           = "AWS/States"
+  metric_name         = "ExecutionsFailed"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    StateMachineArn = aws_sfn_state_machine.submission_orchestration.arn
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "kb_coordinator_errors" {
+  alarm_name          = "${local.resource_prefix}-kb-coordinator-errors"
+  alarm_description   = "Alerts when the KB coordinator Lambda returns invocation errors."
+  namespace           = "AWS/Lambda"
+  metric_name         = "Errors"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    FunctionName = aws_lambda_function.kb_coordinator.function_name
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "documents_stuck_ingesting" {
+  alarm_name          = "${local.resource_prefix}-documents-stuck-ingesting"
+  alarm_description   = "Alerts when documents remain in INGESTING beyond the configured threshold."
+  namespace           = "MDIP/Operations"
+  metric_name         = "DocumentsStuckInIngesting"
+  statistic           = "Maximum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    Environment = var.environment
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "submissions_stuck_non_terminal" {
+  alarm_name          = "${local.resource_prefix}-submissions-stuck-non-terminal"
+  alarm_description   = "Alerts when submissions remain in RECEIVING, COMPLETE, or WAITING_FOR_INDEX beyond the configured threshold."
+  namespace           = "MDIP/Operations"
+  metric_name         = "SubmissionsStuckNonTerminal"
+  statistic           = "Maximum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+
+  dimensions = {
+    Environment = var.environment
+  }
+}
+
+resource "aws_cloudwatch_dashboard" "operations" {
+  dashboard_name = "${local.resource_prefix}-operations"
+
+  dashboard_body = jsonencode({
+    widgets = [
+      {
+        "type"   = "text"
+        "x"      = 0
+        "y"      = 0
+        "width"  = 24
+        "height" = 1
+        "properties" = {
+          "markdown" = "# ${local.resource_prefix} Operations"
+        }
+      },
+      {
+        "type"   = "metric"
+        "x"      = 0
+        "y"      = 1
+        "width"  = 12
+        "height" = 6
+        "properties" = {
+          "region" = var.aws_region
+          "title"  = "Submissions By Status"
+          "view"   = "timeSeries"
+          "stat"   = "Maximum"
+          "period" = 300
+          "metrics" = [
+            ["MDIP/Operations", "SubmissionCount", "Environment", var.environment, "Status", "RECEIVING", { "label" = "RECEIVING" }],
+            [".", "SubmissionCount", ".", ".", "Status", "COMPLETE", { "label" = "COMPLETE" }],
+            [".", "SubmissionCount", ".", ".", "Status", "WAITING_FOR_INDEX", { "label" = "WAITING_FOR_INDEX" }],
+            [".", "SubmissionCount", ".", ".", "Status", "READY", { "label" = "READY" }],
+            [".", "SubmissionCount", ".", ".", "Status", "FAILED", { "label" = "FAILED" }]
+          ]
+        }
+      },
+      {
+        "type"   = "metric"
+        "x"      = 12
+        "y"      = 1
+        "width"  = 12
+        "height" = 6
+        "properties" = {
+          "region" = var.aws_region
+          "title"  = "Ingestion Runs By Status"
+          "view"   = "timeSeries"
+          "stat"   = "Maximum"
+          "period" = 300
+          "metrics" = [
+            ["MDIP/Operations", "IngestionRunCount", "Environment", var.environment, "Status", "STARTED", { "label" = "STARTED" }],
+            [".", "IngestionRunCount", ".", ".", "Status", "SUCCEEDED", { "label" = "SUCCEEDED" }],
+            [".", "IngestionRunCount", ".", ".", "Status", "FAILED", { "label" = "FAILED" }]
+          ]
+        }
+      },
+      {
+        "type"   = "metric"
+        "x"      = 0
+        "y"      = 7
+        "width"  = 12
+        "height" = 6
+        "properties" = {
+          "region" = var.aws_region
+          "title"  = "Callback Failures And Manual Review Queue"
+          "view"   = "timeSeries"
+          "stat"   = "Maximum"
+          "period" = 300
+          "metrics" = [
+            ["MDIP/Operations", "CallbackFailureCount", "Environment", var.environment, { "label" = "Callback Failures" }],
+            ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", aws_sqs_queue.manual_review.name, { "label" = "Manual Review Queue Visible" }]
+          ]
+        }
+      },
+      {
+        "type"   = "metric"
+        "x"      = 12
+        "y"      = 7
+        "width"  = 12
+        "height" = 6
+        "properties" = {
+          "region" = var.aws_region
+          "title"  = "Stuck Pipeline Items"
+          "view"   = "timeSeries"
+          "stat"   = "Maximum"
+          "period" = 300
+          "metrics" = [
+            ["MDIP/Operations", "DocumentsStuckInIngesting", "Environment", var.environment, { "label" = "Documents Stuck Ingesting" }],
+            [".", "SubmissionsStuckNonTerminal", ".", ".", { "label" = "Submissions Stuck Non-Terminal" }],
+            [".", "ManualReviewItemsQueued", ".", ".", { "label" = "Manual Review Items Queued" }]
+          ]
+        }
+      }
+    ]
+  })
 }

@@ -1,0 +1,17 @@
+{
+  "label": "A",
+  "submissionIdTemplate": "phase14-a-{run_id}",
+  "files": [
+    {
+      "fileId": "warehouse-robotics.json",
+      "logicalName": "warehouse_robotics",
+      "source": "sample/warehouse_robotics_us.json"
+    },
+    {
+      "fileId": "vertical-farming.json",
+      "logicalName": "vertical_farming",
+      "source": "sample/vertical_farming_us.json"
+    }
+  ]
+}
+

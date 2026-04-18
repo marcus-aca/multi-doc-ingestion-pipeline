@@ -1,0 +1,155 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Minimal Bedrock Knowledge Base with S3 Vectors for the multi-doc ingestion POC"
+
+Resources:
+  KnowledgeBaseLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: ${knowledge_base_log_group_name}
+      RetentionInDays: 14
+
+  VectorBucket:
+    Type: AWS::S3Vectors::VectorBucket
+    Properties:
+      VectorBucketName: ${vector_bucket_name}
+
+  VectorIndex:
+    Type: AWS::S3Vectors::Index
+    DependsOn:
+      - VectorBucket
+    Properties:
+      VectorBucketArn: !GetAtt VectorBucket.VectorBucketArn
+      IndexName: ${vector_index_name}
+      DataType: float32
+      Dimension: ${embedding_dimensions}
+      DistanceMetric: cosine
+      MetadataConfiguration:
+        NonFilterableMetadataKeys:
+          - AMAZON_BEDROCK_TEXT
+          - AMAZON_BEDROCK_METADATA
+
+  VectorBucketPolicy:
+    Type: AWS::S3Vectors::VectorBucketPolicy
+    DependsOn:
+      - VectorBucket
+      - VectorIndex
+    Properties:
+      VectorBucketArn: !GetAtt VectorBucket.VectorBucketArn
+      Policy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowBedrockKnowledgeBaseRole
+            Effect: Allow
+            Principal:
+              AWS: ${knowledge_base_role_arn}
+            Action:
+              - s3vectors:PutVectors
+              - s3vectors:GetVectors
+              - s3vectors:DeleteVectors
+              - s3vectors:QueryVectors
+              - s3vectors:GetIndex
+            Resource:
+              - !GetAtt VectorBucket.VectorBucketArn
+              - !GetAtt VectorIndex.IndexArn
+
+  KnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    DependsOn:
+      - VectorBucketPolicy
+    Properties:
+      Name: ${knowledge_base_name}
+      Description: "Knowledge base for scoped submission retrieval in the multi-doc ingestion POC"
+      RoleArn: ${knowledge_base_role_arn}
+      KnowledgeBaseConfiguration:
+        Type: VECTOR
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: ${embedding_model_arn}
+          EmbeddingModelConfiguration:
+            BedrockEmbeddingModelConfiguration:
+              Dimensions: ${embedding_dimensions}
+              EmbeddingDataType: FLOAT32
+      StorageConfiguration:
+        Type: S3_VECTORS
+        S3VectorsConfiguration:
+          VectorBucketArn: !GetAtt VectorBucket.VectorBucketArn
+          IndexArn: !GetAtt VectorIndex.IndexArn
+
+  DataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      KnowledgeBaseId: !Ref KnowledgeBase
+      Name: ${data_source_name}
+      Description: "Canonical markdown source documents for the multi-doc ingestion POC"
+      # The whole vector bucket is destroyed with the stack, so retaining data here
+      # avoids long or stuck Bedrock-side cleanup during scratch rebuilds.
+      DataDeletionPolicy: RETAIN
+      DataSourceConfiguration:
+        Type: S3
+        S3Configuration:
+          BucketArn: ${source_bucket_arn}
+          InclusionPrefixes:
+            - ${source_inclusion_prefix}
+      VectorIngestionConfiguration:
+        ChunkingConfiguration:
+          ChunkingStrategy: NONE
+
+  KnowledgeBaseLogDeliverySource:
+    Type: AWS::Logs::DeliverySource
+    DependsOn:
+      - KnowledgeBase
+    Properties:
+      LogType: APPLICATION_LOGS
+      Name: ${knowledge_base_log_delivery_source}
+      ResourceArn: !GetAtt KnowledgeBase.KnowledgeBaseArn
+
+  KnowledgeBaseLogDeliveryDestination:
+    Type: AWS::Logs::DeliveryDestination
+    DependsOn:
+      - KnowledgeBaseLogGroup
+    Properties:
+      Name: ${knowledge_base_log_delivery_dest}
+      DestinationResourceArn: !GetAtt KnowledgeBaseLogGroup.Arn
+      OutputFormat: json
+
+  KnowledgeBaseLogDelivery:
+    Type: AWS::Logs::Delivery
+    DependsOn:
+      - KnowledgeBaseLogDeliverySource
+      - KnowledgeBaseLogDeliveryDestination
+    Properties:
+      DeliveryDestinationArn: !GetAtt KnowledgeBaseLogDeliveryDestination.Arn
+      DeliverySourceName: ${knowledge_base_log_delivery_source}
+
+Outputs:
+  KnowledgeBaseId:
+    Value: !Ref KnowledgeBase
+
+  KnowledgeBaseArn:
+    Value: !GetAtt KnowledgeBase.KnowledgeBaseArn
+
+  KnowledgeBaseStatus:
+    Value: !GetAtt KnowledgeBase.Status
+
+  DataSourceId:
+    Value: !GetAtt DataSource.DataSourceId
+
+  DataSourceStatus:
+    Value: !GetAtt DataSource.DataSourceStatus
+
+  VectorBucketArn:
+    Value: !GetAtt VectorBucket.VectorBucketArn
+
+  VectorBucketName:
+    Value: ${vector_bucket_name}
+
+  VectorIndexArn:
+    Value: !GetAtt VectorIndex.IndexArn
+
+  VectorIndexName:
+    Value: ${vector_index_name}
+
+  KnowledgeBaseLogGroupName:
+    Value: !Ref KnowledgeBaseLogGroup
+
+  KnowledgeBaseLogDeliveryId:
+    Value: !GetAtt KnowledgeBaseLogDelivery.DeliveryId

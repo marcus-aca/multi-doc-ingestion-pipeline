@@ -1,0 +1,24 @@
+{
+  "label": "E",
+  "submissionIdTemplate": "phase14-e-{run_id}",
+  "files": [
+    {
+      "fileId": "warehouse-robotics-update.json",
+      "logicalName": "warehouse_robotics_updated_business_doc",
+      "source": "sample/warehouse_robotics_us.json",
+      "transform": {
+        "type": "update_top_level_fields",
+        "fields": {
+          "report_date": "2026-04-19",
+          "source_version": "v2",
+          "title": "Warehouse Robotics and Automation Solutions in the United States (Updated April 2026)"
+        }
+      }
+    },
+    {
+      "fileId": "modular-construction.json",
+      "logicalName": "modular_construction",
+      "source": "sample/modular_construction_us.json"
+    }
+  ]
+}

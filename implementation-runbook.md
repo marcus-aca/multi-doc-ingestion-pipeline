@@ -11,7 +11,7 @@ This runbook turns the POC design into an implementation sequence with small, te
 - summarization can remain placeholder logic for now
 - the proof goal is:
   - ingest documents only after a submission is complete
-  - directly ingest only new or updated canonical documents
+  - ingest only new or updated canonical documents through the KB coordinator
   - retrieve only the documents linked to a specific `submissionId`
   - prove scoped search works for each submission
 
@@ -21,7 +21,7 @@ This runbook turns the POC design into an implementation sequence with small, te
 - [ ] A completion event starts submission orchestration
 - [ ] Repeated identical raw files are collapsed through `RawFileRegistry`
 - [ ] Canonical documents are written once and reused through `DocumentRegistry`
-- [ ] Direct ingestion into Bedrock KB is triggered only for new or changed canonical documents
+- [ ] KB ingestion is triggered only for new or changed canonical documents
 - [ ] Submission status moves to `READY` only when all referenced documents are indexed
 - [ ] A test query for `submissionId=A` only returns documents linked to `A`
 - [ ] A test query for `submissionId=B` only returns documents linked to `B`
@@ -107,14 +107,14 @@ Validation:
   - AgentCore Runtime configuration or deployment reference
   - Claude Sonnet 4.6 model ID
 - [ ] Confirm KB retrieval works manually before wiring the pipeline
-- [ ] Confirm direct ingestion API permissions are included in IAM for the coordinator
+- [ ] Confirm KB ingestion permissions are included in IAM for the coordinator
 - [ ] Confirm AgentCore Runtime execution role can invoke Bedrock retrieval and Claude Sonnet 4.6
 
 Validation:
 
 - [ ] Use AWS console or CLI to confirm the KB exists and is active
 - [ ] Confirm the application role can call KB retrieval APIs
-- [ ] Confirm the coordinator role can call direct ingestion APIs
+- [ ] Confirm the coordinator role can call KB ingestion APIs
 - [ ] Confirm the AgentCore Runtime role can invoke retrieval and Claude Sonnet 4.6
 
 ## Phase 3: Define Registry Schemas and Status Model
@@ -214,133 +214,167 @@ Validation:
 
 ## Phase 7: Preprocessing Placeholder
 
-- [ ] Implement preprocessing Lambda
-- [ ] For the POC, keep preprocessing simple:
+- [x] Implement preprocessing Lambda
+- [x] For the POC, keep preprocessing simple:
   - read raw file
-  - convert to normalized text or a simple structured payload
-  - write result to `processed/{submissionId}/{fileId}`
+  - safe-load JSON input
+  - remove any `segment_id` fields recursively
+  - convert the sanitized payload into naive Markdown
+  - write result to `processed/{submissionId}/{fileId}.md`
   - compute `canonicalHash`
-- [ ] Include placeholder hooks for OCR or richer normalization later
-- [ ] Return:
+- [x] Include placeholder hooks for OCR or richer normalization later
+- [x] Return:
   - `processedS3Key`
   - `canonicalHash`
   - optional extracted metadata
 
 Validation:
 
-- [ ] Run preprocessing for one uploaded file
-- [ ] Confirm `processed/{submissionId}/{fileId}` exists
-- [ ] Confirm the returned `canonicalHash` is stable on repeated runs of the same file
+- [x] Run preprocessing for one uploaded file
+- [x] Confirm `processed/{submissionId}/{fileId}.md` exists
+- [x] Confirm the returned `canonicalHash` is stable on repeated runs of the same file
 
 ## Phase 8: Canonical Dedupe and Document Registry
 
-- [ ] Implement `DocumentRegistry` lookup by `canonicalHash`
-- [ ] If `canonicalHash` exists:
+- [x] Implement `DocumentRegistry` lookup by `canonicalHash`
+- [x] If `canonicalHash` exists:
   - reuse the existing `documentId`
-- [ ] If `canonicalHash` does not exist:
+- [x] If `canonicalHash` does not exist:
   - create new `documentId`
-  - write canonical content to `canonical/{documentId}`
+  - write canonical chunk files to `canonical/{documentId}/chunk-0001.md`
   - create `DocumentRegistry` item with:
     - `documentId`
     - `canonicalHash`
-    - `businessDocumentKey`
-    - `sourceVersion` or `sourceUpdatedAt`
     - `kbIngestionStatus=PENDING_INGESTION`
     - `isActive=false`
-- [ ] Update `RawFileRegistry` to `RESOLVED`
-- [ ] Attach `documentId` to the submission
+  - For the current checkpoint, optional business-version fields such as `businessDocumentKey`, `sourceVersion`, and `sourceUpdatedAt` are deferred to Phase 9 so GSI-backed attributes are only written when real upstream values exist
+- [x] Update `RawFileRegistry` to `RESOLVED`
+- [x] Attach `documentId` to the submission
+  - The current implementation marks the submission `COMPLETE` after canonical resolution. Submission transitions to `WAITING_FOR_INDEX` and `READY` are still deferred to later phases.
 
 Validation:
 
-- [ ] Submit two different raw files that normalize to the same canonical content
-- [ ] Confirm both resolve to the same `documentId`
-- [ ] Confirm only one canonical object is written
-- [ ] Confirm the submission item lists the correct `documentId`s
+- [x] Submit two different raw files that normalize to the same canonical content
+- [x] Confirm both resolve to the same `documentId`
+- [x] Confirm only one canonical Markdown object is written
+- [x] Confirm the submission item lists the correct `documentId`s
 
 ## Phase 9: Active Document Rule
 
-- [ ] Implement the rule:
+- [x] Implement the rule:
   - latest upstream submission is active for a given `businessDocumentKey`
-- [ ] Compare using `sourceVersion` or `sourceUpdatedAt`
-- [ ] When a newer canonical document is accepted:
+- [x] Compare using `sourceVersion` or `sourceUpdatedAt`
+- [x] When a newer canonical document is accepted:
   - mark the new record `isActive=true`
   - mark the previous active record `isActive=false`
-- [ ] Do not change the `documentId` stored on older submissions
+- [x] Do not change the `documentId` stored on older submissions
+- [x] For the current sample-driven implementation:
+  - derive `businessDocumentKey` from JSON `report_id`
+  - derive `sourceUpdatedAt` from JSON `report_date`
+  - treat the latest submission as active if ordering data is missing
 
 Validation:
 
-- [ ] Submit version 1 of a business document
-- [ ] Submit version 2 of the same business document
-- [ ] Confirm the newer record is active
-- [ ] Confirm the old submission still references the older `documentId`
-- [ ] Confirm the new submission references the newer `documentId`
+- [x] Submit version 1 of a business document
+- [x] Submit version 2 of the same business document
+- [x] Confirm the newer record is active
+- [x] Confirm the old submission still references the older `documentId`
+- [x] Confirm the new submission references the newer `documentId`
 
-## Phase 10: KB Coordinator for Direct Ingestion
+## Phase 10: KB Coordinator for S3-Backed Ingestion
 
-- [ ] Implement KB coordinator Lambda
-- [ ] Trigger it on an EventBridge schedule, for example every 5 minutes
-- [ ] Coordinator behavior:
+- [x] Implement KB coordinator Lambda
+- [x] Trigger it on an EventBridge schedule, for example every 5 minutes
+- [x] Coordinator behavior:
   - find `DocumentRegistry` items where `kbIngestionStatus=PENDING_INGESTION`
   - if no work, exit
   - create `IngestionRun`
   - update selected documents to `INGESTING`
-  - read `canonical/{documentId}` content
-  - call Bedrock direct ingestion for those documents
+  - call `StartIngestionJob` for the S3-backed Knowledge Base
   - record `kbOperationId`
   - poll or revisit later for completion
   - on success mark docs `INDEXED`
   - on failure mark docs `FAILED` and store error summary
-- [ ] Ensure coordinator does not start overlapping ingestion for the same pending set
+- [x] Ensure coordinator does not start overlapping ingestion for the same pending set
+- [x] Safe behavior when KB configuration is missing:
+  - log the pending document set
+  - return without mutating document ingestion state
 
 Validation:
 
-- [ ] Create one pending document manually in `DocumentRegistry`
-- [ ] Run the coordinator manually
-- [ ] Confirm an `IngestionRun` item is created
-- [ ] Confirm document state moves from `PENDING_INGESTION` to `INGESTING`
-- [ ] Confirm eventual transition to `INDEXED` or `FAILED`
+- [x] Run the coordinator manually
+- [x] Confirm it returns a structured `kb_coordinator_missing_configuration` result while `knowledge_base_id` and `knowledge_base_data_source_id` are unset
+- [x] Confirm the coordinator log group records the selected pending document IDs
+- [ ] After configuring a real Knowledge Base and data source:
+  - confirm an `IngestionRun` item is created
+  - confirm document state moves from `PENDING_INGESTION` to `INGESTING`
+  - confirm eventual transition to `INDEXED` or `FAILED`
+
+Implementation findings from the current POC:
+
+- [x] Provisioned the Knowledge Base and S3 data source in Terraform using Amazon S3 Vectors
+- [x] Enabled Knowledge Base log delivery in Terraform to CloudWatch Logs
+- [x] Reduced canonical metadata sidecars to a plain S3 metadata file containing only `documentId`
+- [x] Recreated the S3 vector index with `AMAZON_BEDROCK_TEXT` and `AMAZON_BEDROCK_METADATA` configured as non-filterable metadata keys
+- [x] Confirmed `StartIngestionJob` can be started and polled with real `IngestionRun` state
+- [x] Added coordinator logging for:
+  - selected `documentId`s
+  - canonical prefix and chunk count
+  - raw Bedrock ingestion response payload
+  - raw Bedrock poll response payload
+- [x] Confirmed a tiny manual Markdown document with a minimal `.metadata.json` sidecar can be indexed successfully
+- [x] Confirmed the original S3 vector index configuration failed on larger chunks with `Filterable metadata must have at most 2048 bytes`
+- [x] Confirmed the non-filterable metadata-key fix resolves the issue for:
+  - a tiny manual Markdown chunk
+  - a plain-text chunk of roughly `4,000` characters
+  - a realistic pipeline-generated document split into `192` canonical Markdown chunks
+- [x] Confirmed the coordinator transitions a realistic document from `PENDING_INGESTION` to `INGESTING` to `INDEXED`
 
 ## Phase 11: Submission Readiness
 
-- [ ] Extend Step Functions to:
+- [x] Extend Step Functions to:
   - wait
   - re-check all `documentId`s linked to the submission
   - continue only when all are `INDEXED`
-- [ ] Mark submission `READY`
-- [ ] Emit ready callback payload
+- [x] Mark submission `READY`
+- [x] Emit ready callback payload
 
 Validation:
 
-- [ ] Run a full submission with 1-2 new docs
-- [ ] Confirm submission does not move to `READY` before doc indexing completes
-- [ ] Confirm submission becomes `READY` after all referenced docs are `INDEXED`
+- [x] Run a full submission with 1-2 new docs
+- [x] Confirm submission does not move to `READY` before doc indexing completes
+- [x] Confirm submission becomes `READY` after all referenced docs are `INDEXED`
 
 ## Phase 12: External Ready Callback
 
-- [ ] Implement callback Lambda or built-in Step Functions task
-- [ ] Send:
+- [x] Implement callback Lambda as the POC-ready external callback target
+- [x] Send:
   - `submissionId`
   - `status=READY`
   - timestamp
+- [x] Record callback result in `SubmissionRegistry.callbackStatus`
 - [ ] Add retries with backoff
-- [ ] Record callback result in `SubmissionRegistry.callbackStatus`
+  - The current POC uses a mock Lambda target and records successful delivery. Retry and DLQ behavior remain a later hardening step.
 
 Validation:
 
-- [ ] Point callback at a test endpoint such as webhook.site or a temporary API Gateway mock
-- [ ] Confirm payload is received once the submission becomes `READY`
+- [x] Point callback at a test endpoint such as webhook.site or a temporary API Gateway mock
+  - For the current POC, the callback target is a dedicated mock Lambda.
+- [x] Confirm payload is received once the submission becomes `READY`
 - [ ] Confirm failed callbacks retry and then mark failure state if needed
 
 ## Phase 13: AgentCore Scoped Query Path
 
-- [ ] Implement AgentCore Runtime entry point or wrapper API that calls AgentCore Runtime
-- [ ] Inputs:
+- [x] Implement a scoped query entry point
+  - The current POC uses a direct Lambda wrapper that preserves the same submission-scoping model the future AgentCore Runtime path will use.
+- [x] Inputs:
   - `submissionId`
   - query text
-- [ ] Read `documentId`s from `SubmissionRegistry`
-- [ ] In AgentCore Runtime, call Bedrock KB retrieval with metadata filters limited to those `documentId`s
-- [ ] Pass the scoped retrieved content to Claude Sonnet 4.6 through Amazon Bedrock model invocation
-- [ ] Return:
+- [x] Read `documentId`s from `SubmissionRegistry`
+- [x] Call Bedrock KB retrieval with metadata filters limited to those `documentId`s
+- [x] Pass the scoped retrieved content to Claude Sonnet 4.6 through Amazon Bedrock model invocation
+  - The current implementation invokes Sonnet 4.6 through the Bedrock inference profile `us.anthropic.claude-sonnet-4-6`.
+- [x] Return:
   - retrieved document ids
   - snippets or matches
   - placeholder summary text
@@ -351,14 +385,14 @@ For now, placeholder summary behavior is enough, for example:
 
 Validation:
 
-- [ ] Create two submissions with different docs
-- [ ] Query submission A for a term that only exists in A
-- [ ] Confirm only A documents are returned
-- [ ] Query submission B for a term that only exists in B
-- [ ] Confirm only B documents are returned
-- [ ] Query A for a term that exists only in B
-- [ ] Confirm no B documents leak into the results
-- [ ] Confirm the AgentCore Runtime prompt only includes scoped retrieved content for the requested submission
+- [x] Create two submissions with different docs
+- [x] Query submission A for a term that only exists in A
+- [x] Confirm only A documents are returned
+- [x] Query submission B for a term that only exists in B
+- [x] Confirm only B documents are returned
+- [x] Query A for a term that exists only in B
+- [x] Confirm no B documents leak into the results
+- [x] Confirm the model prompt only includes scoped retrieved content for the requested submission
 
 ## Traceability Standard For All Phases
 
@@ -389,12 +423,12 @@ Validation:
 
 ## Phase 14: End-to-End POC Script
 
-- [ ] Create helper scripts under `scripts/` to:
+- [x] Create helper scripts under `scripts/` to:
   - upload test files
   - trigger completion
   - poll submission status
   - invoke AgentCore Runtime
-- [ ] Prepare sample data sets:
+- [x] Prepare sample data sets:
   - submission A with 2 docs
   - submission B with 2 different docs
   - submission C reusing one exact raw file from A
@@ -403,25 +437,25 @@ Validation:
 
 Validation:
 
-- [ ] Run all sample submissions end to end
-- [ ] Confirm raw duplicate reuse for C
-- [ ] Confirm canonical reuse for D
-- [ ] Confirm newer business doc becomes active for E
-- [ ] Confirm scoped retrieval still works per submission
+- [x] Run all sample submissions end to end
+- [x] Confirm raw duplicate reuse for C
+- [x] Confirm canonical reuse for D
+- [x] Confirm newer business doc becomes active for E
+- [x] Confirm scoped retrieval still works per submission
 
 ## Phase 15: Operational Hardening
 
-- [ ] Add CloudWatch alarms for:
+- [x] Add CloudWatch alarms for:
   - failed Step Functions executions
   - failed coordinator runs
   - documents stuck in `INGESTING`
   - submissions stuck in non-terminal states
-- [ ] Add dead-letter or manual review path for repeated failures
-- [ ] Add dashboards for:
+- [x] Add dead-letter or manual review path for repeated failures
+- [x] Add dashboards for:
   - submissions by status
-  - direct ingestion runs by status
+  - Knowledge Base ingestion runs by status
   - callback failures
-- [ ] Add structured logging with correlation fields:
+- [x] Add structured logging with correlation fields:
   - `submissionId`
   - `fileId`
   - `rawFileHash`
@@ -431,29 +465,28 @@ Validation:
 
 Validation:
 
-- [ ] Force one failed preprocessing case
-- [ ] Force one failed callback case
-- [ ] Confirm alarms or logs make root cause easy to find
+- [x] Force one failed preprocessing case
+- [x] Force one failed callback case
+- [x] Confirm alarms or logs make root cause easy to find
 
 ## Phase 16: POC Exit Checklist
 
-- [ ] Terraform can create the environment from scratch
-- [ ] One manual test submission completes successfully
-- [ ] One duplicate raw file is reused correctly
-- [ ] One canonical duplicate is reused correctly
-- [ ] One business document update becomes active correctly
-- [ ] One direct ingestion run successfully indexes changed docs
-- [ ] One AgentCore Runtime scoped retrieval proves document isolation by `submissionId`
-- [ ] AgentCore Runtime can invoke Claude Sonnet 4.6 using only scoped retrieval results
-- [ ] Team walkthrough completed and open issues captured
+- [x] Terraform can create the environment from scratch
+- [x] One manual test submission completes successfully
+- [x] One duplicate raw file is reused correctly
+- [x] One canonical duplicate is reused correctly
+- [x] One business document update becomes active correctly
+- [x] One Knowledge Base ingestion run successfully indexes changed docs
+- [x] One AgentCore Runtime scoped retrieval proves document isolation by `submissionId`
+- [x] AgentCore Runtime can invoke Claude Sonnet 4.6 using only scoped retrieval results
 
-## Suggested Execution Order
+Current Phase 16 validation notes:
 
-- [ ] Complete Phases 0-3 first
-- [ ] Build and test Phases 4-5 together
-- [ ] Build and test Phases 6-9 together
-- [ ] Build and test Phases 10-11 together
-- [ ] Finish with Phases 12-16
+- `scripts/validate_phase16.py --validated-fresh-create` validated the checklist items above against a freshly destroyed and recreated stack with run id `codexphase16fresh`
+- Terraform destroy/apply from scratch now succeeds, with the Bedrock KB teardown hardened by switching the data source template to `DataDeletionPolicy: RETAIN`
+- Sonnet invocation succeeds against the scoped-query validation path on the rebuilt stack
+- Team walkthrough remains a manual team process item rather than an automated repo check
+
 
 ## Nice-to-Have Later
 

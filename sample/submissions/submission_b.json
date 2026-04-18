@@ -1,0 +1,17 @@
+{
+  "label": "B",
+  "submissionIdTemplate": "phase14-b-{run_id}",
+  "files": [
+    {
+      "fileId": "pet-insurance.json",
+      "logicalName": "pet_insurance",
+      "source": "sample/pet_insurance_us.json"
+    },
+    {
+      "fileId": "cloud-kitchen.json",
+      "logicalName": "cloud_kitchen",
+      "source": "sample/cloud_kitchen_services_us.json"
+    }
+  ]
+}
+

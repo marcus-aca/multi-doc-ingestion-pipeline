@@ -1,0 +1,20 @@
+{
+  "label": "D",
+  "submissionIdTemplate": "phase14-d-{run_id}",
+  "files": [
+    {
+      "fileId": "warehouse-robotics-compact.json",
+      "logicalName": "warehouse_robotics_canonical_duplicate",
+      "source": "sample/warehouse_robotics_us.json",
+      "transform": {
+        "type": "compact_json"
+      }
+    },
+    {
+      "fileId": "e-waste-recycling.json",
+      "logicalName": "e_waste_recycling",
+      "source": "sample/e_waste_recycling_us.json"
+    }
+  ]
+}
+

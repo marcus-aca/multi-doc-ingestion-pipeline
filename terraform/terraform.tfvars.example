@@ -2,14 +2,16 @@ aws_region             = "us-east-1"
 environment            = "dev"
 name_prefix            = "mdip-poc"
 
-# Populate this once the Bedrock Knowledge Base is created or assigned.
-knowledge_base_id      = ""
+# Embedding model and dimensions for the provisioned Bedrock Knowledge Base.
+embedding_model_id     = "amazon.titan-embed-text-v2:0"
+embedding_dimensions   = 256
 
 # Placeholder name used for AgentCore Runtime-related IAM scoping.
 agentcore_runtime_name = "mdip-poc-runtime"
 
 # Claude Sonnet model used by the AgentCore path.
 sonnet_model_id        = "anthropic.claude-sonnet-4-6"
+sonnet_inference_profile_id = "us.anthropic.claude-sonnet-4-6"
 
 ingestion_retention_days = 14
 processed_retention_days = 3
