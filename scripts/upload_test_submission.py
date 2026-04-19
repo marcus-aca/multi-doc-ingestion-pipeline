@@ -20,9 +20,20 @@ def main() -> None:
     manifest = load_manifest(args.manifest, run_id=args.run_id)
     context = create_context()
     result = upload_submission(context, manifest)
-    print(json.dumps(result, indent=2, sort_keys=True))
+    printable_result = dict(result)
+    printable_result["files"] = [
+        {
+            key: value
+            for key, value in {
+                **file_result,
+                "byteCount": len(file_result["rawBytes"]),
+            }.items()
+            if key != "rawBytes"
+        }
+        for file_result in result["files"]
+    ]
+    print(json.dumps(printable_result, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":
     main()
-
